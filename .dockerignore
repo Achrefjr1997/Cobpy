@@ -1,0 +1,15 @@
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.git
+**/.env
+.gitignore
+README.md
+*.md
+stages/
+scripts/
+backend/data/
+backend/logs/
+frontend/dist/
+frontend/node_modules/

@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Node
+node_modules/
+*.local
+
+# Environment
+.env
+.env.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+*.db
+benchmark_results.csv
+ablation_results.csv
+benchmark_programs/*/bin/
+logs/
+test_runs/
+
+# Build outputs
+frontend/dist/

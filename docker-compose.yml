@@ -1,0 +1,45 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - data:/app/data
+      - logs:/app/logs
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - FIREWORKS_API_KEY=${FIREWORKS_API_KEY:-}
+      - FIREWORKS_TRANSLATE_MODEL=${FIREWORKS_TRANSLATE_MODEL:-accounts/fireworks/models/deepseek-v4-pro}
+      - FIREWORKS_JUDGE_MODEL=${FIREWORKS_JUDGE_MODEL:-accounts/fireworks/models/deepseek-v4-pro}
+      - FIREWORKS_PLANNER_MODEL=${FIREWORKS_PLANNER_MODEL:-accounts/fireworks/models/deepseek-v4-pro}
+      - FIREWORKS_ANALYZE_MODEL=${FIREWORKS_ANALYZE_MODEL:-accounts/fireworks/models/deepseek-v4-pro}
+      - FIREWORKS_REFLECT_MODEL=${FIREWORKS_REFLECT_MODEL:-accounts/fireworks/models/deepseek-v4-pro}
+      - CORS_ORIGINS=["http://localhost:5173"]
+      - DATABASE_PATH=data/migrations.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  data:
+  logs:

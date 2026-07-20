@@ -1,0 +1,51 @@
+[project]
+name = "cobol-migrator"
+version = "0.1.0"
+description = "COBOL to Python Agentic Migrator"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.136.0",
+    "google-generativeai>=0.8.6",
+    "hatchling>=1.29.0",
+    "httpx>=0.28.1",
+    "hypothesis>=6.152.1",
+    "langchain-anthropic>=1.4.1",
+    "langchain-google-genai>=4.2.2",
+    "langchain-openai>=1.1.16",
+    "langgraph>=1.1.9",
+    "openai>=2.32.0",
+    "pydantic-settings>=2.14.0",
+    "pyflakes>=3.4.0",
+    "python-multipart>=0.0.26",
+    "uvicorn[standard]>=0.45.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cobol_migrator"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.11",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
