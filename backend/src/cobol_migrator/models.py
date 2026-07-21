@@ -71,6 +71,7 @@ def get_chat_model(task: TaskType) -> BaseChatModel:
             api_key=settings.fireworks_api_key,
             base_url="https://api.fireworks.ai/inference/v1",
             temperature=0.0 if task in ("translate", "judge") else 0.2,
+            max_tokens=65536 if task == "translate" else None,
         )
 
     else:
