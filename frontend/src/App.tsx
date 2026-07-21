@@ -34,10 +34,15 @@ import {
   startMigration,
   stopMigration,
   uploadAndMigrate,
+  uploadZip,
+  migrateFromZip,
   getDownloadUrl,
   subscribeEvents,
+  startBatchMigration,
+  subscribeBatchEvents,
   type AgentEvent,
   type MigrationRequest,
+  type ZipUploadResponse,
 } from "./lib/api";
 
 const queryClient = new QueryClient();
@@ -644,17 +649,26 @@ function StatusBadge({
 }
 
 function MigratorApp() {
-  const [sourceType, setSourceType] = useState<"snippet" | "file">("snippet");
+  const [sourceType, setSourceType] = useState<"snippet" | "file" | "zip">("snippet");
   const [sourceRef, setSourceRef] = useState(SAMPLE_COBOL);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [createDummyFiles, setCreateDummyFiles] = useState(false);
+  const [zipResult, setZipResult] = useState<ZipUploadResponse | null>(null);
+  const [selectedZipProgram, setSelectedZipProgram] = useState<string>("");
+  const [zipLoading, setZipLoading] = useState(false);
+  const [zipError, setZipError] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
-  const [finalCode, setFinalCode] = useState<string | null>(null);
+  const [finalCode, setFinalCode] = useState<Record<string, string>>({});
+  const [selectedResultProgram, setSelectedResultProgram] = useState<string>("");
   const [copied, setCopied] = useState(false);
+  const [batchId, setBatchId] = useState<string | null>(null);
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [batchSharedModelCode, setBatchSharedModelCode] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const zipRef = useRef<HTMLInputElement>(null);
   const { data: health, isLoading: healthLoading } = useQuery({
     queryKey: ["health"],
     queryFn: fetchHealth,
@@ -673,17 +687,158 @@ function MigratorApp() {
     reader.readAsText(file);
   };
 
+  const handleZipUpload = async (file: File) => {
+    setZipError(null);
+    setZipResult(null);
+    setSelectedZipProgram("");
+    setBatchId(null);
+    setIsBatchRunning(false);
+    setBatchSharedModelCode(null);
+    setZipLoading(true);
+    try {
+      const result = await uploadZip(file);
+      setZipResult(result);
+      setSelectedZipProgram("*all*");
+    } catch (err) {
+      setZipError(err instanceof Error ? err.message : "ZIP upload failed");
+    } finally {
+      setZipLoading(false);
+    }
+  };
+
   const handleStartMigration = async () => {
     setEvents([]);
-    setFinalCode(null);
+    setFinalCode({});
+    setSelectedResultProgram("");
     setIsStreaming(true);
     setIsStopping(false);
 
     try {
-      let response;
+      if (sourceType === "zip" && zipResult && selectedZipProgram === "*all*") {
+        // Batch migration — all programs
+        const batchResp = await startBatchMigration(zipResult.job_id, createDummyFiles);
+        setBatchId(batchResp.batch_id);
+        setIsBatchRunning(true);
+
+        const cleanup = subscribeBatchEvents(batchResp.batch_id, (event) => {
+          switch (event.type) {
+            case "batch_started":
+              setEvents((prev) => [...prev, {
+                type: "planner_decision",
+                payload: {
+                  reasoning: `Batch migration started for ${event.payload.programs} programs: ${event.payload.migration_order.join(" → ")}`,
+                  next_action: "BATCH",
+                  target_draft_id: null,
+                  step_count: 0,
+                },
+                run_id: batchResp.batch_id,
+              }]);
+              break;
+
+            case "program_started":
+              setEvents((prev) => [...prev, {
+                type: "planner_decision",
+                payload: {
+                  reasoning: `Migrating ${event.payload.program_id} (${event.payload.index}/${event.payload.total})`,
+                  next_action: "TRANSLATE",
+                  target_draft_id: null,
+                  step_count: event.payload.index,
+                },
+                run_id: batchResp.batch_id,
+              }]);
+              break;
+
+            case "program_completed": {
+              const verdictLabel = event.payload.verdict === "passed" ? "passed" : event.payload.verdict;
+              setEvents((prev) => [...prev, {
+                type: "cobol_validation",
+                payload: {
+                  passed: event.payload.verdict !== "error" && event.payload.verdict !== "errored",
+                  message: `${event.payload.program_id} — ${verdictLabel}${event.payload.error ? `: ${event.payload.error}` : ""}`,
+                },
+                run_id: batchResp.batch_id,
+              }]);
+              break;
+            }
+
+            case "program_error":
+              setEvents((prev) => [...prev, {
+                type: "error",
+                payload: { message: `${event.payload.program_id}: ${event.payload.error}` },
+                run_id: batchResp.batch_id,
+              }]);
+              break;
+
+            case "program_event": {
+              const innerType = event.payload.event_type;
+              const innerPayload = event.payload.event_payload;
+              setEvents((prev) => [...prev, {
+                type: innerType,
+                payload: innerPayload,
+                run_id: batchResp.batch_id,
+              } as any]);
+              if (innerType === "draft_created" && innerPayload?.code) {
+                const pid = event.payload.program_id.toLowerCase();
+                setFinalCode((prev) => ({
+                  ...prev,
+                  [pid]: innerPayload.code,
+                }));
+                setSelectedResultProgram(pid);
+              }
+              break;
+            }
+
+            case "batch_completed":
+              setIsStreaming(false);
+              setIsBatchRunning(false);
+              setIsStopping(false);
+              if (event.payload.shared_model_code) {
+                setBatchSharedModelCode(event.payload.shared_model_code);
+                setFinalCode((prev) => ({
+                  ...prev,
+                  ["shared_models"]: event.payload.shared_model_code!,
+                }));
+              }
+              const issues: string[] = Object.entries(event.payload.program_results)
+                .filter(([, r]: [string, any]) => r.error)
+                .map(([pid, r]: [string, any]) => `${pid}: ${r.error}`);
+              if (event.payload.integration_issues) {
+                issues.push(...event.payload.integration_issues.map(
+                  (i: string) => `Integration: ${i}`
+                ));
+              }
+              setEvents((prev) => [...prev, {
+                type: "done",
+                payload: {
+                  verdict: event.payload.status === "completed" ? "passed" : "partial",
+                  issues,
+                },
+                run_id: batchResp.batch_id,
+              }]);
+              break;
+
+            case "batch_done":
+              setIsStreaming(false);
+              setIsBatchRunning(false);
+              break;
+          }
+        });
+
+        return cleanup;
+      }
+
+      // Single program migration
+      let response: MigrationStartResponse;
 
       if (sourceType === "file" && uploadedFile) {
         response = await uploadAndMigrate(uploadedFile, 25, createDummyFiles);
+      } else if (sourceType === "zip" && zipResult && selectedZipProgram) {
+        response = await migrateFromZip(
+          zipResult.job_id,
+          selectedZipProgram,
+          25,
+          createDummyFiles,
+        );
       } else {
         const request: MigrationRequest = {
           source_type: "snippet",
@@ -700,7 +855,8 @@ function MigratorApp() {
         setEvents((prev) => [...prev, event]);
 
         if (event.type === "draft_created") {
-          setFinalCode(event.payload.code);
+          setFinalCode({ [response.run_id.toLowerCase()]: event.payload.code });
+          setSelectedResultProgram(response.run_id.toLowerCase());
         }
 
         if (event.type === "done") {
@@ -760,7 +916,7 @@ function MigratorApp() {
   const confidence = doneEvent?.type === "done" ? doneEvent.payload?.confidence : null;
 
   const getStatus = (): "idle" | "running" | "success" | "error" | "partial" | "cancelled" => {
-    if (isStreaming) return "running";
+    if (isStreaming || isBatchRunning) return "running";
     if (wasCancelled) return "cancelled";
     if (hasError) return "error";
     if (isDone && testsPassed) return "success";
@@ -770,8 +926,11 @@ function MigratorApp() {
 
   const canStart =
     !isStreaming &&
+    !isBatchRunning &&
     health?.status === "ok" &&
-    (sourceType === "snippet" ? sourceRef.trim().length > 0 : uploadedFile !== null);
+    (sourceType === "snippet" ? sourceRef.trim().length > 0 :
+     sourceType === "zip" ? selectedZipProgram.length > 0 || zipResult !== null :
+     uploadedFile !== null);
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-gray-100">
@@ -842,7 +1001,7 @@ function MigratorApp() {
 
               {/* Source type selector */}
               <div className="flex gap-2 mb-4 flex-shrink-0">
-                {(["snippet", "file"] as const).map((type) => (
+                {(["snippet", "file", "zip"] as const).map((type) => (
                   <button
                     key={type}
                     onClick={() => setSourceType(type)}
@@ -860,10 +1019,15 @@ function MigratorApp() {
                         <Code2 className="w-4 h-4" />
                         Paste Code
                       </>
-                    ) : (
+                    ) : type === "file" ? (
                       <>
                         <Upload className="w-4 h-4" />
                         Upload File
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="w-4 h-4" />
+                        ZIP Upload
                       </>
                     )}
                   </button>
@@ -911,9 +1075,8 @@ function MigratorApp() {
                       }}
                     />
                   </div>
-                ) : (
+                ) : sourceType === "file" ? (
                   <div className="h-full flex flex-col gap-4">
-                    {/* File upload area */}
                     <div
                       onClick={() => !isStreaming && fileInputRef.current?.click()}
                       onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
@@ -965,7 +1128,6 @@ function MigratorApp() {
                       )}
                     </div>
 
-                    {/* Preview of uploaded file */}
                     {uploadedFile && sourceRef && (
                       <div className="flex-1 min-h-0 rounded-xl overflow-hidden border border-gray-700/50">
                         <Editor
@@ -983,6 +1145,121 @@ function MigratorApp() {
                             readOnly: true,
                           }}
                         />
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="h-full flex flex-col gap-4">
+                    <div
+                      onClick={() => !isStreaming && !zipLoading && zipRef.current?.click()}
+                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const dropped = e.dataTransfer.files[0] as File | undefined;
+                        if (!isStreaming && !zipLoading && dropped) {
+                          handleZipUpload(dropped);
+                        }
+                      }}
+                      className={`
+                        flex flex-col items-center justify-center p-6 rounded-xl border-2 border-dashed
+                        transition-all cursor-pointer
+                        bg-gray-800/20 border-gray-700/50 hover:border-gray-600/50 hover:bg-gray-800/30
+                        ${isStreaming || zipLoading ? "opacity-50 cursor-not-allowed" : ""}
+                      `}
+                    >
+                      <input
+                        ref={zipRef}
+                        type="file"
+                        accept=".zip"
+                        className="hidden"
+                        disabled={isStreaming || zipLoading}
+                        onChange={(e) => {
+                          const selected = e.target.files?.[0] as File | undefined;
+                          if (selected) handleZipUpload(selected);
+                        }}
+                      />
+                      <FileText className="w-8 h-8 mb-2 text-gray-500" />
+                      <p className="text-gray-400 font-medium text-sm">Upload a ZIP archive</p>
+                      <p className="text-xs text-gray-500 mt-1">.zip with .cbl, .cob, .cpy files</p>
+                    </div>
+
+                    {zipLoading && (
+                      <div className="flex items-center gap-3 p-3 rounded-xl bg-cyan-950/20 border border-cyan-800/30">
+                        <motion.div
+                          animate={{ rotate: 360 }}
+                          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        >
+                          <Zap className="w-5 h-5 text-cyan-400" />
+                        </motion.div>
+                        <span className="text-sm text-cyan-300">Analyzing ZIP...</span>
+                      </div>
+                    )}
+
+                    {zipError && (
+                      <div className="p-3 rounded-xl bg-red-950/20 border border-red-800/30 text-red-400 text-sm">
+                        {zipError}
+                      </div>
+                    )}
+
+                    {zipResult && !zipLoading && (
+                      <div className="flex flex-col gap-3 min-h-0 overflow-y-auto">
+                        <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-800/30">
+                          {(() => {
+                            const progs = Object.entries(zipResult.dependency_graph)
+                              .filter(([, v]) => !v.file_path.toLowerCase().endsWith(".cpy"));
+                            const cpy = Object.entries(zipResult.dependency_graph)
+                              .filter(([, v]) => v.file_path.toLowerCase().endsWith(".cpy"));
+                            return (
+                              <>
+                                <p className="text-sm text-emerald-400 font-medium">
+                                  {progs.length} program{(progs.length !== 1 ? "s" : "")}
+                                  {cpy.length > 0 && (
+                                    <span className="text-gray-500 font-normal"> + {cpy.length} copybook{cpy.length !== 1 ? "s" : ""}</span>
+                                  )}
+                                </p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                  Order: {zipResult.migration_order.join(" → ")}
+                                </p>
+                              </>
+                            );
+                          })()}
+                        </div>
+
+                        <select
+                          value={selectedZipProgram}
+                          onChange={(e) => setSelectedZipProgram(e.target.value)}
+                          disabled={isStreaming || isBatchRunning}
+                          className="w-full px-3 py-2 rounded-xl bg-gray-800/50 border border-gray-700/50 text-sm text-gray-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
+                        >
+                          <option value="">Select a program to migrate...</option>
+                          <option value="*all*">All Programs (batch)</option>
+                          {zipResult.migration_order
+                            .filter((pid) => {
+                              const info = zipResult.dependency_graph[pid];
+                              return info && !info.file_path.toLowerCase().endsWith(".cpy");
+                            })
+                            .map((pid) => (
+                              <option key={pid} value={pid}>{pid}</option>
+                            ))}
+                        </select>
+
+                        {selectedZipProgram && selectedZipProgram !== "*all*" && (
+                          <div className="flex-1 min-h-[200px] rounded-xl overflow-hidden border border-gray-700/50">
+                            <Editor
+                              height="200px"
+                              defaultLanguage="cobol"
+                              value={zipResult.dependency_graph[selectedZipProgram]?.source ?? ""}
+                              theme="vs-dark"
+                              options={{
+                                minimap: { enabled: false },
+                                fontSize: 12,
+                                lineNumbers: "on",
+                                readOnly: true,
+                              }}
+                            />
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1117,13 +1394,57 @@ function MigratorApp() {
           <div className="col-span-4 flex flex-col min-h-0">
             <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl border border-gray-800/50 p-5 flex flex-col h-full min-h-0 overflow-hidden">
               <div className="flex items-center justify-between mb-4 flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-200 flex items-center gap-2">
-                  <Code2 className="w-5 h-5 text-emerald-400" />
-                  Generated Python
-                </h2>
-                {finalCode && (
+                <div className="flex items-center gap-3 overflow-hidden">
+                  <h2 className="text-lg font-semibold text-gray-200 flex items-center gap-2 flex-shrink-0">
+                    <Code2 className="w-5 h-5 text-emerald-400" />
+                    Generated Python
+                  </h2>
+                  {Object.keys(finalCode).length > 0 && (
+                    <div className="flex gap-1 overflow-x-auto">
+                      {Object.keys(finalCode).map((pid) => (
+                        <button
+                          key={pid}
+                          onClick={() => setSelectedResultProgram(pid)}
+                          className={`
+                            px-2 py-1 rounded text-xs font-mono transition-all whitespace-nowrap
+                            ${selectedResultProgram === pid
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/50"
+                              : "bg-gray-800/50 text-gray-400 border border-gray-700/50 hover:text-gray-200"}
+                          `}
+                        >
+                          {pid}.py
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {Object.keys(finalCode).length > 0 && (
                   <div className="flex items-center gap-2">
-                    {/* Download button */}
+                    {Object.keys(finalCode).length > 1 && (
+                      <motion.button
+                        onClick={async () => {
+                          // Download all as ZIP
+                          const JSZip = (await import("jszip")).default;
+                          const zip = new JSZip();
+                          for (const [pid, code] of Object.entries(finalCode)) {
+                            zip.file(`${pid}.py`, code);
+                          }
+                          const blob = await zip.generateAsync({ type: "blob" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = "migration-results.zip";
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-violet-900/30 text-violet-400 hover:bg-violet-900/50 transition-colors border border-violet-700/30"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span className="text-xs">All</span>
+                      </motion.button>
+                    )}
                     {isDone && runId && (
                       <motion.button
                         onClick={handleDownloadCode}
@@ -1135,7 +1456,6 @@ function MigratorApp() {
                         <span className="text-xs">.py</span>
                       </motion.button>
                     )}
-                    {/* Copy button */}
                     <motion.button
                       onClick={handleCopyCode}
                       whileHover={{ scale: 1.05 }}
@@ -1224,29 +1544,34 @@ function MigratorApp() {
 
               {/* Code output */}
               <div className="flex-1 min-h-0 rounded-xl overflow-hidden border border-gray-700/50">
-                {finalCode ? (
-                  <Editor
-                    height="100%"
-                    defaultLanguage="python"
-                    value={finalCode}
-                    theme="vs-dark"
-                    options={{
-                      minimap: { enabled: false },
-                      fontSize: 13,
-                      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-                      lineNumbers: "on",
-                      scrollBeyondLastLine: false,
-                      padding: { top: 12, bottom: 12 },
-                      readOnly: true,
-                    }}
-                  />
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-gray-600 bg-gray-800/20">
-                    <Code2 className="w-12 h-12 mb-4 opacity-30" />
-                    <p className="text-sm">Generated code will appear here</p>
-                    <p className="text-xs mt-1">Waiting for migration...</p>
-                  </div>
-                )}
+                {(() => {
+                  const codeToShow = selectedResultProgram && finalCode[selectedResultProgram]
+                    ? finalCode[selectedResultProgram]
+                    : Object.values(finalCode)[0];
+                  return codeToShow ? (
+                    <Editor
+                      height="100%"
+                      defaultLanguage="python"
+                      value={codeToShow}
+                      theme="vs-dark"
+                      options={{
+                        minimap: { enabled: false },
+                        fontSize: 13,
+                        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                        lineNumbers: "on",
+                        scrollBeyondLastLine: false,
+                        padding: { top: 12, bottom: 12 },
+                        readOnly: true,
+                      }}
+                    />
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-gray-600 bg-gray-800/20">
+                      <Code2 className="w-12 h-12 mb-4 opacity-30" />
+                      <p className="text-sm">Generated code will appear here</p>
+                      <p className="text-xs mt-1">Waiting for migration...</p>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>

@@ -54,7 +54,109 @@ def init_db() -> None:
             ON migrations(verdict);
         """)
 
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS batch_jobs (
+                batch_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                migration_order TEXT NOT NULL,
+                program_results TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+
     logger.info(f"Database initialized at {db_path}")
+
+
+@dataclass
+class BatchProgramResult:
+    program_id: str
+    status: str
+    verdict: str | None
+    error: str | None
+    final_code: str | None
+    run_id: str | None
+    draft_count: int
+    test_count: int
+    interface: dict | None
+
+
+@dataclass
+class BatchRecord:
+    batch_id: str
+    job_id: str
+    status: str
+    migration_order: list[str]
+    program_results: dict[str, dict[str, Any]]
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> BatchRecord:
+        return cls(
+            batch_id=row["batch_id"],
+            job_id=row["job_id"],
+            status=row["status"],
+            migration_order=json.loads(row["migration_order"]),
+            program_results=json.loads(row["program_results"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+def save_batch_record(record: BatchRecord) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO batch_jobs (
+                batch_id, job_id, status, migration_order,
+                program_results, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.batch_id,
+                record.job_id,
+                record.status,
+                json.dumps(record.migration_order),
+                json.dumps(record.program_results),
+                record.created_at,
+                record.updated_at,
+            ),
+        )
+    logger.info(f"Saved batch record {record.batch_id}")
+
+
+def get_batch_record(batch_id: str) -> BatchRecord | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM batch_jobs WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return BatchRecord.from_row(row)
+
+
+def update_batch_program(
+    batch_id: str,
+    program_id: str | None,
+    result: dict[str, Any] | None,
+    status: str | None = None,
+) -> None:
+    record = get_batch_record(batch_id)
+    if record is None:
+        return
+
+    if program_id and result is not None:
+        record.program_results[program_id] = result
+
+    if status is not None:
+        record.status = status
+
+    record.updated_at = datetime.now().isoformat()
+    save_batch_record(record)
 
 
 @contextmanager

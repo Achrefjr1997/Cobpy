@@ -208,6 +208,10 @@ def run_migration(
     run_id: str | None = None,
     create_dummy_files: bool = False,
     check_cancelled: Callable[[], bool] | None = None,
+    copybook_include_dir: str | None = None,
+    dependency_interfaces: dict[str, Any] | None = None,
+    dependency_code: dict[str, str] | None = None,
+    shared_model_code: str | None = None,
 ) -> AgentState:
     """
     Run a complete migration on the given COBOL source.
@@ -221,6 +225,8 @@ def run_migration(
                            dependencies are detected, allowing tests to run.
                            If False, finish with partial verdict for external deps.
         check_cancelled: Optional callback that returns True if migration should stop.
+        dependency_interfaces: Interfaces of already-migrated callee programs
+                              (used by batch orchestration for cross-program context).
     
     Returns the final agent state after the graph completes.
     """
@@ -255,6 +261,10 @@ def run_migration(
         run_id=run_id,
         created_at=created_at.isoformat(),
         create_dummy_files=create_dummy_files,
+        copybook_include_dir=copybook_include_dir,
+        dependency_interfaces=dependency_interfaces,
+        dependency_code=dependency_code,
+        shared_model_code=shared_model_code,
     )
 
     initial_state["_run_logger"] = run_logger  # type: ignore
@@ -279,8 +289,8 @@ def run_migration(
         final_state["error"] = str(e)
         final_state["done"] = True
 
-    # Clean up test_runs directory for this run
-    _cleanup_test_runs()
+    # Preserve test_runs/ for debugging — remove if disk space is a concern
+    # _cleanup_test_runs()
 
     drafts = final_state.get("python_drafts", [])
     test_runs = final_state.get("test_runs", [])

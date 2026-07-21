@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # Database
     database_path: str = "data/migrations.db"
 
+    # Data directory (for ZIP job extraction, logs, etc.)
+    data_dir: str = "data"
+
     def get_model(
         self, task: Literal["translate", "judge", "planner", "analyze", "reflect"]
     ) -> str:

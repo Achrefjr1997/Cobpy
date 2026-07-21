@@ -41,6 +41,8 @@ def run_tests(state: AgentState) -> dict[str, Any]:
     cobol_source = state.get("cobol_source", "")
     io_contract = state.get("io_contract")
     program_summary = state.get("program_summary")
+    dependency_code = state.get("dependency_code", {})
+    shared_model_code = state.get("shared_model_code")
 
     # Emit start event
     emit(
@@ -61,6 +63,8 @@ def run_tests(state: AgentState) -> dict[str, Any]:
         timeout=60,
         cleanup_on_success=True,
         program_summary=program_summary if should_create_dummy_files else None,
+        dependency_code=dependency_code,
+        shared_model_code=shared_model_code,
     )
 
     # Log to run logger if available

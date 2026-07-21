@@ -142,7 +142,7 @@ def _extract_imports(code: str) -> set[str]:
     return modules
 
 
-def _get_required_packages(python_code: str, test_code: str) -> list[str]:
+def _get_required_packages(python_code: str, test_code: str, extra_local_modules: set[str] | None = None) -> list[str]:
     """
     Determine which packages need to be installed for the code to run.
     
@@ -151,7 +151,9 @@ def _get_required_packages(python_code: str, test_code: str) -> list[str]:
     all_imports = _extract_imports(python_code) | _extract_imports(test_code)
     
     # Local modules that are part of the test environment (not pip packages)
-    local_modules = {"main", "test_main", "__init__"}
+    local_modules = {"main", "test_main", "__init__", "shared_models"}
+    if extra_local_modules:
+        local_modules.update(m.lower() for m in extra_local_modules)
     
     packages_to_install = []
     for module in all_imports:
@@ -463,6 +465,8 @@ def create_test_environment(
     io_contract: dict | None = None,
     create_dummy_files_flag: bool = False,
     program_summary: str | None = None,
+    dependency_code: dict[str, str] | None = None,
+    shared_model_code: str | None = None,
 ) -> tuple[TestEnvironment | None, str | None]:
     """
     Create an isolated test environment with its own virtual environment.
@@ -477,6 +481,7 @@ def create_test_environment(
         cobol_source: Original COBOL source (for dummy file generation)
         io_contract: I/O contract from analysis (for dummy file generation)
         create_dummy_files_flag: Whether to create dummy input files
+        dependency_code: Module name → Python code for dependency stubs (batch mode)
     
     Returns:
         Tuple of (TestEnvironment, error_message).
@@ -506,6 +511,20 @@ def create_test_environment(
         init_file = src_dir / "__init__.py"
         init_file.write_text("")
         
+        # Write dependency stubs for batch mode (cross-program imports)
+        # Use lowercase filenames since Python module imports are conventionally lowercase
+        if dependency_code:
+            for module_name, module_code in dependency_code.items():
+                stub_file = src_dir / f"{module_name.lower()}.py"
+                stub_file.write_text(module_code)
+                logger.info(f"Wrote dependency stub: {module_name.lower()}.py")
+        
+        # Write shared_models.py if provided (batch mode, from copybooks)
+        if shared_model_code:
+            shared_models_file = src_dir / "shared_models.py"
+            shared_models_file.write_text(shared_model_code)
+            logger.info("Wrote shared_models.py from copybook models")
+        
         dummy_files: list[str] = []
         installed_packages: list[str] = []
         venv_dir = temp_dir / "venv"
@@ -527,7 +546,8 @@ def create_test_environment(
                     logger.warning(f"Failed to create dummy files: {result.error}")
         
         # ALWAYS install pytest and any detected dependencies
-        packages = _get_required_packages(python_code, test_code)
+        extra_local = set(dependency_code.keys()) if dependency_code else None
+        packages = _get_required_packages(python_code, test_code, extra_local)
         success, msg = _install_in_venv(venv_dir, python_executable, packages)
         if success:
             installed_packages = ["pytest"] + packages
@@ -565,6 +585,7 @@ def run_tests_in_environment(
     python_code: str,
     timeout: int = 60,
     max_install_retries: int = 2,
+    local_module_names: set[str] | None = None,
 ) -> TestResult:
     """
     Run tests in the isolated environment using the venv's Python.
@@ -646,7 +667,7 @@ def run_tests_in_environment(
                 break
             
             # Check if failure was due to missing modules
-            missing_modules = _extract_missing_modules(result.stdout, result.stderr)
+            missing_modules = _extract_missing_modules(result.stdout, result.stderr, local_module_names)
             
             if missing_modules and attempt < max_install_retries and env.venv_dir.exists():
                 logger.info(f"Test failed due to missing modules: {missing_modules}, installing...")
@@ -708,31 +729,34 @@ def run_tests_in_environment(
     )
 
 
-def _extract_missing_modules(stdout: str, stderr: str) -> list[str]:
+def _extract_missing_modules(stdout: str, stderr: str, local_modules: set[str] | None = None) -> list[str]:
     """
     Extract names of missing modules from test output.
     
     Returns list of module/package names that need to be installed.
+    Filters out known local modules (stubs, stdlib).
     """
     combined = f"{stdout}\n{stderr}"
     missing = []
+    known_local = {m.lower() for m in (local_modules or set())}
     
     # Pattern: ModuleNotFoundError: No module named 'xxx'
     for match in re.finditer(r"no module named ['\"]?(\w+)", combined, re.IGNORECASE):
         module = match.group(1)
-        if module not in STDLIB_MODULES and module not in {"main", "test_main"}:
-            # Map import name to package name if needed
-            package = IMPORT_TO_PACKAGE.get(module, module)
-            if package not in missing:
-                missing.append(package)
+        if module.lower() in STDLIB_MODULES or module.lower() in known_local:
+            continue
+        package = IMPORT_TO_PACKAGE.get(module, module)
+        if package not in missing:
+            missing.append(package)
     
     # Pattern: ImportError: cannot import name 'xxx' from 'yyy'
     for match in re.finditer(r"cannot import name .+ from ['\"]?(\w+)", combined, re.IGNORECASE):
         module = match.group(1)
-        if module not in STDLIB_MODULES and module not in {"main", "test_main"}:
-            package = IMPORT_TO_PACKAGE.get(module, module)
-            if package not in missing:
-                missing.append(package)
+        if module.lower() in STDLIB_MODULES or module.lower() in known_local:
+            continue
+        package = IMPORT_TO_PACKAGE.get(module, module)
+        if package not in missing:
+            missing.append(package)
     
     return missing
 
@@ -794,6 +818,8 @@ def run_isolated_tests(
     timeout: int = 60,
     cleanup_on_success: bool = True,
     program_summary: str | None = None,
+    dependency_code: dict[str, str] | None = None,
+    shared_model_code: str | None = None,
 ) -> TestResult:
     """
     High-level function to run tests in a complete isolated environment.
@@ -813,6 +839,7 @@ def run_isolated_tests(
         create_dummy_files_flag: Whether to create venv, dummy files, install deps
         timeout: Test timeout in seconds
         cleanup_on_success: Whether to cleanup temp dir on successful tests
+        dependency_code: Module name → Python code for dependency stubs (batch mode)
     
     Returns:
         TestResult with complete execution details
@@ -824,6 +851,8 @@ def run_isolated_tests(
         io_contract=io_contract,
         create_dummy_files_flag=create_dummy_files_flag,
         program_summary=program_summary,
+        dependency_code=dependency_code,
+        shared_model_code=shared_model_code,
     )
     
     if error or env is None:
@@ -836,7 +865,8 @@ def run_isolated_tests(
         )
     
     try:
-        result = run_tests_in_environment(env, python_code, timeout)
+        local_module_names = set(dependency_code.keys()) if dependency_code else None
+        result = run_tests_in_environment(env, python_code, timeout, local_module_names=local_module_names)
         
         # Cleanup on success, keep on failure for debugging
         if result.passed and cleanup_on_success:

@@ -7,16 +7,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from cobol_migrator.env_utils import build_safe_env
 from cobol_migrator.safety import UnsafeImportError, check_code_safety
 
 logger = logging.getLogger(__name__)
-
-SAFE_ENV = {
-    "PATH": "/usr/bin:/usr/local/bin",
-    "HOME": "/tmp",
-    "LANG": "C.UTF-8",
-    "COB_LIBRARY_PATH": "/usr/lib/gnucobol",
-}
 
 
 @dataclass
@@ -44,7 +38,7 @@ def _compile_cobol(cobol_source: str, tmpdir: Path) -> tuple[bool, str, Path | N
             capture_output=True,
             text=True,
             timeout=30,
-            env=SAFE_ENV,
+            env=build_safe_env(include_cobol=True),
             cwd=str(tmpdir),
         )
 
@@ -71,7 +65,7 @@ def _run_cobol(binary_path: Path, inputs: list[str], tmpdir: Path) -> tuple[str,
             capture_output=True,
             text=True,
             timeout=10,
-            env=SAFE_ENV,
+            env=build_safe_env(include_cobol=True),
             cwd=str(tmpdir),
         )
         return result.stdout, result.stderr
@@ -95,7 +89,7 @@ def _run_python(python_code: str, inputs: list[str], tmpdir: Path) -> tuple[str,
             capture_output=True,
             text=True,
             timeout=10,
-            env=SAFE_ENV,
+            env=build_safe_env(),
             cwd=str(tmpdir),
         )
         return result.stdout, result.stderr

@@ -55,6 +55,14 @@ class AgentState(TypedDict, total=False):
     
     All list fields are append-only. Nodes return partial updates;
     the graph wrapper merges them into the canonical state.
+
+    Note: TypedDict is used intentionally instead of Pydantic BaseModel.
+    LangGraph's state merging relies on dict semantics and partial-key
+    updates from each node. A BaseModel would require custom merge logic
+    or expose frozen-field conflicts. The old AGENTS.md mandated Pydantic
+    schemas (``GraphState``), but the in-memory runtime trade-off favours
+    TypedDict for the agent loop; persistence schemas (e.g. DB records)
+    still use Pydantic where validation matters at I/O boundaries.
     """
 
     # Input
@@ -107,12 +115,24 @@ class AgentState(TypedDict, total=False):
     external_dependency_detected: bool
     external_resource: str | None
 
+    # Multi-file (ZIP job) support
+    copybook_include_dir: str | None  # Path for cobc -I flag
+
     # Dummy file options
     create_dummy_files: bool  # User option: create dummy files for testing
     dummy_files_created: list[str]  # List of dummy file paths created
 
     # Test issues tracking (for partial status reporting)
     test_issues: list[str]  # Detected issues during test execution
+
+    # Batch migration — interfaces of already-migrated callee programs
+    dependency_interfaces: dict[str, Any]  # program_id → InterfaceDef dict
+
+    # Batch migration — Python code of already-migrated callee programs (for test stubs)
+    dependency_code: dict[str, str]  # program_id → final Python code
+
+    # Shared Pydantic models generated from copybooks (batch mode)
+    shared_model_code: str | None
 
 
 def create_initial_state(
@@ -124,6 +144,10 @@ def create_initial_state(
     run_id: str | None = None,
     created_at: str | None = None,
     create_dummy_files: bool = False,
+    copybook_include_dir: str | None = None,
+    dependency_interfaces: dict[str, Any] | None = None,
+    dependency_code: dict[str, str] | None = None,
+    shared_model_code: str | None = None,
 ) -> AgentState:
     """Create a fresh agent state for a new migration run."""
     return AgentState(
@@ -154,4 +178,8 @@ def create_initial_state(
         create_dummy_files=create_dummy_files,
         dummy_files_created=[],
         test_issues=[],
+        copybook_include_dir=copybook_include_dir,
+        dependency_interfaces=dependency_interfaces or {},
+        dependency_code=dependency_code or {},
+        shared_model_code=shared_model_code,
     )

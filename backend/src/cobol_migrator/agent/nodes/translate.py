@@ -58,6 +58,10 @@ Example - parsing a record with PIC 9(03)V99:
 emp_hours = float(line[36:41]) / 100  # Divide by 100 for V99
 ```
 
+{dependency_context}
+
+{shared_model_context}
+
 ## Program Analysis
 {analysis_context}
 
@@ -128,6 +132,72 @@ def _build_lessons_context(state: AgentState) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def _build_shared_models_context(state: AgentState) -> str:
+    model_code = state.get("shared_model_code")
+    if not model_code:
+        return ""
+    # Extract model names from the code
+    import re
+    model_names = re.findall(r"^class\s+(\w+)", model_code, re.MULTILINE)
+    import_list = ", ".join(model_names) if model_names else "..."
+    return (
+        "## Shared Data Models (from copybooks)\n"
+        "These Pydantic models are defined in **shared_models.py**.\n"
+        f"Import them with: `from shared_models import {import_list}`\n"
+        "Do NOT redefine them — use the shared model:\n"
+        f"```python\n{model_code}\n```"
+    )
+
+
+def _build_dependency_context(state: AgentState) -> str:
+    dep_interfaces = state.get("dependency_interfaces", {})
+    if not dep_interfaces:
+        return ""
+
+    from cobol_migrator.interface_extractor import (
+        InterfaceDef, ParamDef, PythonParamDef, interface_to_prompt_block,
+    )
+
+    parts = ["## Dependency programs already migrated"]
+    for pid, iface_data in dep_interfaces.items():
+        if isinstance(iface_data, dict):
+            params = [
+                ParamDef(
+                    name=p.get("name", ""),
+                    pic_clause=p.get("pic_clause", ""),
+                    level=p.get("level", 1),
+                )
+                for p in iface_data.get("parameters", [])
+            ]
+            py_params = [
+                PythonParamDef(
+                    name=p.get("name", ""),
+                    type_hint=p.get("type_hint"),
+                )
+                for p in iface_data.get("python_parameters", [])
+            ]
+            iface = InterfaceDef(
+                program_id=iface_data.get("program_id", pid),
+                parameters=params,
+                copybooks_used=iface_data.get("copybooks_used", []),
+                python_function_name=iface_data.get("python_function_name"),
+                python_parameters=py_params,
+                python_return_type=iface_data.get("python_return_type"),
+            )
+            block = interface_to_prompt_block(iface)
+        else:
+            block = interface_to_prompt_block(iface_data)
+        if block:
+            parts.append(block)
+
+    parts.append(
+        "\nThese programs are already migrated to Python. "
+        "If this program CALLs any of them, import and call the generated Python function. "
+        "Use the Python function name and signature shown above."
+    )
+    return "\n\n".join(parts)
+
+
 def translate(state: AgentState) -> dict[str, Any]:
     """
     The translate node: generates a Python translation of the COBOL source.
@@ -140,11 +210,15 @@ def translate(state: AgentState) -> dict[str, Any]:
 
     analysis_context = _build_analysis_context(state)
     lessons_context = _build_lessons_context(state)
+    dependency_context = _build_dependency_context(state)
+    shared_model_context = _build_shared_models_context(state)
 
     prompt = TRANSLATE_SYSTEM_PROMPT.format(
         cobol_source=cobol_source,
         analysis_context=analysis_context,
         lessons_context=lessons_context,
+        dependency_context=dependency_context,
+        shared_model_context=shared_model_context,
     )
 
     try:

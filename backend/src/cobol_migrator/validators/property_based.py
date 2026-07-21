@@ -7,15 +7,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from cobol_migrator.env_utils import build_safe_env
 from cobol_migrator.safety import UnsafeImportError, check_code_safety
 
 logger = logging.getLogger(__name__)
-
-SAFE_ENV = {
-    "PATH": "/usr/bin:/usr/local/bin",
-    "HOME": "/tmp",
-    "LANG": "C.UTF-8",
-}
 
 
 @dataclass
@@ -138,7 +133,7 @@ def run_property_validation(
                 capture_output=True,
                 text=True,
                 timeout=60,
-                env=SAFE_ENV,
+                env=build_safe_env(),
                 cwd=str(tmppath),
             )
 
