@@ -50,6 +50,29 @@ from cobol_migrator.zip_processor import find_copybook_dirs, scan_cobol_dependen
 
 logger = logging.getLogger(__name__)
 
+
+def _get_transitive_callees(
+    program_id: str,
+    graph: dict[str, dict[str, Any]],
+    visited: set[str] | None = None,
+) -> set[str]:
+    """Compute the transitive closure of a program's callees via DFS.
+
+    Returns all program IDs reachable through the call graph starting
+    from *program_id*, excluding *program_id* itself.  Cycles are
+    handled via the *visited* set.
+    """
+    if visited is None:
+        visited = set()
+    visited.add(program_id)
+    result: set[str] = set()
+    for callee in graph.get(program_id, {}).get("calls", []):
+        if callee not in visited:
+            result.add(callee)
+            result |= _get_transitive_callees(callee, graph, visited)
+    return result
+
+
 _batch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
 _batch_completed: dict[str, dict[str, Any]] = {}
 _batch_cancelled: set[str] = set()
@@ -172,15 +195,16 @@ async def _run_batch_task(
         if check_cancelled():
             raise BatchCancelledError("Batch cancelled")
 
+        transitive_callees = _get_transitive_callees(program_id, graph)
         dep_interfaces = {
             pid: iface
             for pid, iface in completed_interfaces.items()
-            if pid in graph.get(program_id, {}).get("calls", [])
+            if pid in transitive_callees
         }
         dep_code = {
             pid: code
             for pid, code in completed_code.items()
-            if pid in graph.get(program_id, {}).get("calls", [])
+            if pid in transitive_callees
         }
         dep_context = ""
         if dep_interfaces:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -32,12 +34,25 @@ idiomatic, minimal, working Python code.
 6. Do NOT import os, subprocess, socket, or any dangerous system modules
 
 ## When to import what
-- `decimal.Decimal`: ONLY if COBOL uses COMP-3, packed decimals, or explicit decimal precision
+- `decimal.Decimal`: ONLY if COBOL uses COMP-3, BINARY with V, packed decimals (PACKED-DECIMAL), or explicit decimal precision in PIC (V). Regular COMP/BINARY/COMP-5 with PIC 9 only -> `int`. POINTER -> `int`. COMP-1/COMP-2 -> `float`.
 - `math`: ONLY if COBOL uses mathematical functions (SQRT, SIN, COS, etc.)
 - `typing`: ONLY if you need type annotations for complex structures
 - For simple programs that just DISPLAY text: NO IMPORTS NEEDED
 
-## COBOL Fixed-Width Records - CRITICAL
+## Table Access (OCCURS)
+When the shared model has OCCURS fields typed as `list[ChildModel]`:
+- Use `model.field_name[i]` to access element at 0-based index i
+- Use `for item in model.field_name:` to iterate
+- COBOL uses 1-based indexing, so `TABLE(1)` in COBOL → Python `table[0]`
+- Nested: `model.field_name[i].child_field` accesses a field inside the i-th occurrence
+
+## REDEFINES Fields
+When a field has REDEFINES, multiple COBOL fields share the same storage bytes:
+- The bytes-backed record class uses `@property` accessors on a shared `bytearray` buffer
+- Writing to one field implicitly changes the value read from another field that REDEFINES it
+- For fixed-width file I/O: read/write the full `bytearray` buffer, not individual fields
+
+## Fixed-Width Records - CRITICAL
 COBOL files use FIXED-WIDTH records with NO separators between fields:
 - Each field has an EXACT position and length defined by PIC clauses
 - Fields are concatenated directly - NO spaces between them!
@@ -61,6 +76,8 @@ emp_hours = float(line[36:41]) / 100  # Divide by 100 for V99
 {dependency_context}
 
 {shared_model_context}
+
+{copybook_context}
 
 ## Program Analysis
 {analysis_context}
@@ -132,21 +149,69 @@ def _build_lessons_context(state: AgentState) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def _build_model_structure(model_code: str) -> str:
+    """Extract a compact structural summary from generated model code.
+
+    Returns a tree-like text showing class names, field names, types, and
+    PIC clause annotations.  Detects OCCURS (list[...]) fields and marks
+    them with [TABLE].
+    """
+    lines: list[str] = []
+    current_class: str | None = None
+    for line in model_code.splitlines():
+        class_m = re.match(r"^class\s+(\w+)", line)
+        if class_m:
+            current_class = class_m.group(1)
+            lines.append(f"  {current_class}:")
+            continue
+        if current_class is None:
+            continue
+        field_m = re.match(r"^\s+(\w+):\s+(\w+.*?)(?:\s+#\s*(.*))?$", line)
+        if not field_m:
+            continue
+        name = field_m.group(1)
+        py_type = field_m.group(2).rstrip(",")
+        pic = (field_m.group(3) or "").strip()
+        if py_type.startswith("list["):
+            lines.append(f"    |-- {name}: {py_type}  [TABLE]")
+        else:
+            suffix = f"  # {pic}" if pic else ""
+            lines.append(f"    |-- {name}: {py_type}{suffix}")
+    return "\n".join(lines)
+
+
+def _build_copybook_context(state: AgentState) -> str:
+    """Provide original copybook source for fields used by this program."""
+    copybook_source = state.get("copybook_source")
+    if not copybook_source:
+        return ""
+    return (
+        "## Copybook Sources\n"
+        "The following copybook fields are used by this program:\n"
+        f"```cobol\n{copybook_source}\n```"
+    )
+
+
 def _build_shared_models_context(state: AgentState) -> str:
     model_code = state.get("shared_model_code")
     if not model_code:
         return ""
-    # Extract model names from the code
-    import re
     model_names = re.findall(r"^class\s+(\w+)", model_code, re.MULTILINE)
     import_list = ", ".join(model_names) if model_names else "..."
-    return (
-        "## Shared Data Models (from copybooks)\n"
-        "These Pydantic models are defined in **shared_models.py**.\n"
-        f"Import them with: `from shared_models import {import_list}`\n"
-        "Do NOT redefine them — use the shared model:\n"
-        f"```python\n{model_code}\n```"
-    )
+    structure = _build_model_structure(model_code)
+    parts = [
+        "## Shared Data Models (from copybooks)",
+        "These Pydantic models are defined in **shared_models.py**.",
+        f"Import them with: `from shared_models import {import_list}`",
+        "Do NOT redefine them — use the shared model.\n",
+    ]
+    if structure:
+        parts.append("### Structure Summary")
+        parts.append(structure)
+        parts.append("")
+    parts.append("### Full Pydantic Code")
+    parts.append(f"```python\n{model_code}\n```")
+    return "\n".join(parts)
 
 
 def _build_dependency_context(state: AgentState) -> str:
@@ -198,6 +263,46 @@ def _build_dependency_context(state: AgentState) -> str:
     return "\n\n".join(parts)
 
 
+def _validate_dependency_calls(
+    code: str,
+    dep_interfaces: dict[str, Any],
+) -> list[str]:
+    """Check cross-module function calls match known dependency signatures."""
+    errors: list[str] = []
+    if not dep_interfaces:
+        return errors
+
+    callee_map: dict[str, tuple[int, str]] = {}
+    for pid, iface_data in dep_interfaces.items():
+        if isinstance(iface_data, dict):
+            func_name = iface_data.get("python_function_name")
+            params = iface_data.get("python_parameters", [])
+        else:
+            func_name = iface_data.python_function_name
+            params = iface_data.python_parameters
+        if func_name:
+            callee_map[func_name] = (len(params), pid)
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return errors
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            func_name = node.func.id
+            if func_name in callee_map:
+                expected_count, callee_pid = callee_map[func_name]
+                actual_count = len(node.args)
+                if actual_count != expected_count:
+                    errors.append(
+                        f"Integration: {func_name}() called with {actual_count} args, "
+                        f"expected {expected_count} (defined in {callee_pid})"
+                    )
+
+    return errors
+
+
 def translate(state: AgentState) -> dict[str, Any]:
     """
     The translate node: generates a Python translation of the COBOL source.
@@ -212,6 +317,7 @@ def translate(state: AgentState) -> dict[str, Any]:
     lessons_context = _build_lessons_context(state)
     dependency_context = _build_dependency_context(state)
     shared_model_context = _build_shared_models_context(state)
+    copybook_context = _build_copybook_context(state)
 
     prompt = TRANSLATE_SYSTEM_PROMPT.format(
         cobol_source=cobol_source,
@@ -219,14 +325,38 @@ def translate(state: AgentState) -> dict[str, Any]:
         lessons_context=lessons_context,
         dependency_context=dependency_context,
         shared_model_context=shared_model_context,
+        copybook_context=copybook_context,
     )
+
+    existing_drafts = list(state.get("python_drafts", []))
 
     try:
         model = get_structured_model("translate", TranslationResult)
         result: TranslationResult = model.invoke(prompt)
     except Exception as e:
         logger.error(f"Translation LLM call failed: {e}")
-        return {"error": f"Translation failed: {e}"}
+        return {"python_drafts": existing_drafts, "error": f"Translation failed: {e}"}
+
+    validation_errors = _validate_dependency_calls(
+        result.code, state.get("dependency_interfaces", {})
+    )
+
+    if validation_errors:
+        lessons = list(state.get("lessons_learned", []))
+        lessons.append(
+            "Call signature mismatch: "
+            + "; ".join(validation_errors)
+        )
+        logger.warning(f"Integration errors: {validation_errors}")
+        emit(
+            "integration_error",
+            {"errors": validation_errors, "code": result.code},
+        )
+        return {
+            "python_drafts": existing_drafts,
+            "lessons_learned": lessons,
+            "error": "; ".join(validation_errors),
+        }
 
     draft = Draft.create(
         code=result.code,
@@ -246,7 +376,6 @@ def translate(state: AgentState) -> dict[str, Any]:
 
     logger.info(f"Created draft {draft.id}: {result.rationale[:80]}")
 
-    existing_drafts = list(state.get("python_drafts", []))
     existing_drafts.append(draft)
 
     return {

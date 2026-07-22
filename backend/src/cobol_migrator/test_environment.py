@@ -142,20 +142,31 @@ def _extract_imports(code: str) -> set[str]:
     return modules
 
 
-def _get_required_packages(python_code: str, test_code: str, extra_local_modules: set[str] | None = None) -> list[str]:
+def _get_required_packages(python_code: str, test_code: str, dependency_code: dict[str, str] | None = None) -> list[str]:
     """
     Determine which packages need to be installed for the code to run.
     
     Filters out standard library modules and local modules, returns pip package names.
+    ``dependency_code`` is the dict of already-migrated callee modules (keys = module names,
+    values = Python source). Its keys and internal imports are treated as local modules.
     """
     all_imports = _extract_imports(python_code) | _extract_imports(test_code)
     
     # Local modules that are part of the test environment (not pip packages)
-    local_modules = {"main", "test_main", "__init__", "shared_models"}
-    if extra_local_modules:
-        local_modules.update(m.lower() for m in extra_local_modules)
+    local_modules: set[str] = {"main", "test_main", "__init__", "shared_models"}
     
-    packages_to_install = []
+    # Dynamically register all dependency modules as local
+    if dependency_code:
+        local_modules.update(m.lower() for m in dependency_code)
+        # Also scan dependency code bodies for transitive imports
+        for module_code in dependency_code.values():
+            imported = _extract_imports(module_code)
+            local_modules.update(
+                m.lower() for m in imported
+                if m.lower() not in STDLIB_MODULES
+            )
+    
+    packages_to_install: list[str] = []
     for module in all_imports:
         if module in STDLIB_MODULES:
             continue
@@ -546,8 +557,8 @@ def create_test_environment(
                     logger.warning(f"Failed to create dummy files: {result.error}")
         
         # ALWAYS install pytest and any detected dependencies
-        extra_local = set(dependency_code.keys()) if dependency_code else None
-        packages = _get_required_packages(python_code, test_code, extra_local)
+        # (dependency_code dict is passed directly so internal imports are also scanned)
+        packages = _get_required_packages(python_code, test_code, dependency_code)
         success, msg = _install_in_venv(venv_dir, python_executable, packages)
         if success:
             installed_packages = ["pytest"] + packages

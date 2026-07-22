@@ -255,7 +255,7 @@ export type BatchEvent =
   | { type: "program_completed"; payload: { program_id: string; index: number; total: number; verdict: string; error: string | null }; batch_id: string }
   | { type: "program_error"; payload: { program_id: string; index: number; total: number; error: string }; batch_id: string }
   | { type: "batch_completed"; payload: { status: string; program_results: Record<string, { program_id: string; verdict: string; error: string | null }>; shared_model_code?: string | null; integration_issues?: string[] }; batch_id: string }
-  | { type: "program_event"; payload: { program_id: string; index: number; total: number; event_type: string; event_payload: any }; batch_id: string }
+  | { type: "program_event"; payload: { program_id: string; index: number; total: number; event_type: string; event_payload: Record<string, unknown> }; batch_id: string }
   | { type: "batch_done"; batch_id: string };
 
 export async function startBatchMigration(
