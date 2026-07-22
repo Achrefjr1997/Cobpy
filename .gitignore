@@ -14,8 +14,11 @@ node_modules/
 # Environment
 .env
 .env.local
-cobol2python\cobol_agent_course_project_plan.md
-
+cobol_agent_course_project_plan.md
+.opencode
+.ruff_cache
+docs
+stages
 # IDEs
 .idea/
 .vscode/
