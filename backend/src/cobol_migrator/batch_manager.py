@@ -502,7 +502,7 @@ def _check_integration(
                 callee_pid = defined_functions[callee]
                 if callee_pid in completed_interfaces:
                     iface = completed_interfaces[callee_pid]
-                    if iface.python_function_name:
+                    if iface.python_function_name and callee == iface.python_function_name:
                         expected_param_count = len(iface.python_parameters)
                         args_text = m.group(2).strip()
                         actual_arg_count = 0

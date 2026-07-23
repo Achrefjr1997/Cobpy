@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 *.egg-info/
 .eggs/
 dist/
@@ -14,7 +15,7 @@ node_modules/
 # Environment
 .env
 .env.local
-cobol_agent_course_project_plan.md
+/cobol_agent_course_project_plan.md
 .opencode
 .ruff_cache
 docs
@@ -37,6 +38,7 @@ ablation_results.csv
 benchmark_programs/*/bin/
 logs/
 test_runs/
+backend/data/
 
 # Build outputs
 frontend/dist/

@@ -62,6 +62,33 @@ def test_multiple_deps_one_wrong():
     assert "expected 3" in errors[0]
 
 
+def test_self_referential_call_skipped():
+    """Calls to functions defined in the current module should be skipped."""
+    deps = {
+        "EXCHPROC": {
+            "python_function_name": "main",
+            "python_parameters": [{"name": "rma_header_rec"}],
+        }
+    }
+    code = "def main():\n    main()\ndef other():\n    main()"
+    assert _validate_dependency_calls(code, deps) == []
+
+
+def test_self_call_not_skipped_for_dep_funcs():
+    """Calls to dependency exported functions not defined locally should still validate."""
+    deps = {
+        "RESTOCK": {
+            "python_function_name": "restock",
+            "python_parameters": [{"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"}],
+        }
+    }
+    code = "def main():\n    restock(1, 2, 3)"
+    errors = _validate_dependency_calls(code, deps)
+    assert len(errors) == 1
+    assert "3 args" in errors[0]
+    assert "expected 5" in errors[0]
+
+
 def test_syntax_error_returns_empty():
     deps = {
         "FUNC1": {

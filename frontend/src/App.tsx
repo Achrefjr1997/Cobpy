@@ -31,6 +31,7 @@ import {
   startBatchMigration,
   subscribeBatchEvents,
   type AgentEvent,
+  type BatchEvent,
   type MigrationRequest,
   type MigrationStartResponse,
   type ZipUploadResponse,
@@ -89,6 +90,10 @@ function MigratorApp() {
   const [copied, setCopied] = useState(false);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [batchProgramResults, setBatchProgramResults] = useState<
+    Record<string, { verdict: string; confidence?: number }>
+  >({});
+  const [rawBatchEvents, setRawBatchEvents] = useState<BatchEvent[]>([]);
   const [activeSourceFile, setActiveSourceFile] = useState<string>("");
   const [activeOutputFile, setActiveOutputFile] = useState<string>("");
   const [openSourceTabs, setOpenSourceTabs] = useState<Tab[]>([]);
@@ -185,8 +190,11 @@ function MigratorApp() {
         const batchResp = await startBatchMigration(zipResult.job_id, createDummyFiles);
         setBatchId(batchResp.batch_id);
         setIsBatchRunning(true);
+        setBatchProgramResults({});
+        setRawBatchEvents([]);
 
         const cleanup = subscribeBatchEvents(batchResp.batch_id, (event) => {
+          setRawBatchEvents((prev) => [...prev, event]);
           switch (event.type) {
             case "batch_started":
               setEvents((prev) => [...prev, {
@@ -215,6 +223,10 @@ function MigratorApp() {
               break;
 
             case "program_completed": {
+              setBatchProgramResults((prev) => ({
+                ...prev,
+                [event.payload.program_id]: { verdict: event.payload.verdict },
+              }));
               const verdictLabel = event.payload.verdict === "passed" ? "passed" : event.payload.verdict;
               setEvents((prev) => [...prev, {
                 type: "cobol_validation",
@@ -228,6 +240,10 @@ function MigratorApp() {
             }
 
             case "program_error":
+              setBatchProgramResults((prev) => ({
+                ...prev,
+                [event.payload.program_id]: { verdict: "errored" },
+              }));
               setEvents((prev) => [...prev, {
                 type: "error",
                 payload: { message: `${event.payload.program_id}: ${event.payload.error}` },
@@ -258,6 +274,11 @@ function MigratorApp() {
               setIsStreaming(false);
               setIsBatchRunning(false);
               setIsStopping(false);
+              const finalResults: Record<string, { verdict: string; confidence?: number }> = {};
+              for (const [pid, r] of Object.entries(event.payload.program_results)) {
+                finalResults[pid] = { verdict: r.verdict, confidence: undefined };
+              }
+              setBatchProgramResults(finalResults);
               if (event.payload.shared_model_code) {
                 setFinalCode((prev) => ({
                   ...prev,
@@ -878,6 +899,9 @@ function MigratorApp() {
       {showGraph && zipResult && (
         <DependencyGraph
           graph={zipResult.dependency_graph}
+          batchProgramResults={batchProgramResults}
+          batchEvents={rawBatchEvents}
+          migrationOrder={zipResult.migration_order}
           onSelectFile={(id) => {
             setActiveSourceFile(id);
             const info = zipResult.dependency_graph[id];

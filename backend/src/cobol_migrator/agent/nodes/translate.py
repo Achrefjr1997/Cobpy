@@ -288,9 +288,16 @@ def _validate_dependency_calls(
     except SyntaxError:
         return errors
 
+    local_funcs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            local_funcs.add(node.name)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             func_name = node.func.id
+            if func_name in local_funcs:
+                continue
             if func_name in callee_map:
                 expected_count, callee_pid = callee_map[func_name]
                 actual_count = len(node.args)
