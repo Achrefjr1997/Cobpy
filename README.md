@@ -54,8 +54,8 @@ choco install gnucobol
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/Akshit-77/IE624-cobol-migrator.git
-cd IE624-cobol-migrator
+https://github.com/Achrefjr1997/Cobpy.git
+cd Cobpy
 ```
 
 ### 2. Run Setup
